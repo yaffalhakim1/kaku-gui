@@ -1,0 +1,16 @@
+# Rust build output
+/target
+
+# Windows debugging symbols
+*.pdb
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Local secrets, if they ever appear
+.env
+.env.local

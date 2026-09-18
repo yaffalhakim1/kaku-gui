@@ -1,0 +1,26 @@
+[package]
+name = "kaku-gui"
+version = "0.1.0"
+edition = "2021"
+authors = ["yafit"]
+description = "Native GUI client for opencode, built with GPUI"
+
+[dependencies]
+gpui = { git = "https://github.com/egoist/zed", branch = "waku-webview" }
+gpui_platform = { git = "https://github.com/egoist/zed", branch = "waku-webview", features = [
+    "font-kit",
+    "wayland",
+    "x11",
+] }
+anyhow = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
