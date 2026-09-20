@@ -1,13 +1,13 @@
 > **HISTORICAL NOTES — not authoritative.**
 > The roadmap and stack facts live in `AGENTS.md`. Where this file disagrees
 > with it, `AGENTS.md` wins. The "Phase 0" below describes how the scaffold was
-> *created* in an earlier session; in the tutorial, Phase 00 is a recap of the
+> _created_ in an earlier session; in the tutorial, Phase 00 is a recap of the
 > scaffold that already exists. Phases 8–9 here are older, more ambitious
 > sketches than the current `docs/phases/` files.
 
 # Kaku GUI — Implementation Plan
 
-A native desktop client for OpenCode, built with Rust + GPUI (the same stack as [waku](https://github.com/egoist/waku)). This plan assumes a single-crate app that talks directly to a running `opencode serve` instance, reusing the HTTP/SSE client from [kaku-tui](../kaku-tui).
+A native desktop client for OpenCode, built with Rust + GPUI (the same stack as [waku](https://github.com/egoist/waku)). This plan assumes a single-crate app that talks directly to a running `opencode serve` instance, talking to the OpenCode HTTP API directly.
 
 ## Architecture decisions
 
@@ -24,8 +24,8 @@ A native desktop client for OpenCode, built with Rust + GPUI (the same stack as 
 - [x] Create `src/main.rs` that opens a centered window.
 - [x] Create `src/app.rs` with `KakuApp` entity and `Render` impl.
 - [x] Create `src/theme.rs` with kaku colors.
-- [ ] `src/input.rs` does NOT exist yet. It is typed by hand in Phase 02.
-- [ ] `src/client/` does NOT exist yet. It is typed by hand in Phase 03.
+- [x] `src/input.rs` is created by hand in Phase 02.
+- [ ] `src/client/` is created by hand in Phase 03.
 
 **Verification:** `cargo check` passes and a dark window opens.
 
@@ -93,11 +93,11 @@ A native desktop client for OpenCode, built with Rust + GPUI (the same stack as 
 
 **Goal:** Stream assistant responses from `GET /event` into the UI.
 
-- Port `kaku-tui/src/main.rs::spawn_sse_reader` to run on `cx.background_executor()`.
+- Run the SSE reader on `cx.background_executor()`, feeding the UI through a channel that `render` drains.
 - Use `std::sync::mpsc::channel` (or `crossbeam-channel`) to send `StreamEvent` into the UI.
 - Start the SSE reader after `create_session` succeeds.
 - In `KakuApp::render`, drain the receiver and call `apply_event` for each event.
-- Reuse the `apply_event` logic from `kaku-tui`:
+- The `apply_event` shape:
   - `PartUpdated.delta` present → append to assistant message.
   - `PartUpdated.text` only → replace assistant message.
   - `SessionIdle` → set `Idle`, clear `streaming_idx`.
@@ -122,7 +122,7 @@ A native desktop client for OpenCode, built with Rust + GPUI (the same stack as 
 
 **Goal:** Add `/` commands and persistence.
 
-- Port `kaku-tui/src/commands.rs`.
+- Add a small `src/commands.rs` for local slash commands.
 - Support `/clear`, `/model`, `/quit`, `/help`.
 - Persist window size/position to a JSON file in `~/.config/kaku-gui/`.
 - Persist last used model override.
@@ -153,14 +153,14 @@ A native desktop client for OpenCode, built with Rust + GPUI (the same stack as 
 
 ## Reference files
 
-| File | Purpose |
-|---|---|
-| `src/main.rs` | App bootstrap, window open, global key bindings |
-| `src/app.rs` | Root entity, render tree, state mutation |
-| `src/input.rs` | Text input entity (Phase 02 — planned, not yet created) |
-| `src/theme.rs` | Color palette |
-| `src/client/mod.rs` | HTTP client and SSE request builder (Phase 03 — planned, not yet created) |
-| `src/client/types.rs` | OpenCode wire types (Phase 03 — planned, not yet created) |
+| File                  | Purpose                                                                   |
+| --------------------- | ------------------------------------------------------------------------- |
+| `src/main.rs`         | App bootstrap, window open, global key bindings                           |
+| `src/app.rs`          | Root entity, render tree, state mutation                                  |
+| `src/input.rs`        | Text input entity (Phase 02 — planned, not yet created)                   |
+| `src/theme.rs`        | Color palette                                                             |
+| `src/client/mod.rs`   | HTTP client and SSE request builder (Phase 03 — planned, not yet created) |
+| `src/client/types.rs` | OpenCode wire types (Phase 03 — planned, not yet created)                 |
 
 ## Risks and mitigations
 

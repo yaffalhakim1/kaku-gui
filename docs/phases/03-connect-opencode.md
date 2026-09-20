@@ -1,20 +1,21 @@
 # Phase 03 — Connect to OpenCode
 
 ## What you will build
-The app reads environment variables, checks that `opencode serve` is running, and creates a session on startup.
+The app reads an environment variable, installs a real HTTP client, checks that `opencode serve` is running, and creates a session on startup.
 
 ## Concepts you will learn
 - Adding dependencies in `Cargo.toml`.
 - Creating a module with a subdirectory (`src/client/`).
 - `async` / `await` in Rust.
 - `Option` and `Result` error handling.
-- GPUI's background executor.
+- GPUI's async tasks and how a result gets back into the UI.
 - Reading environment variables.
 
 ## Files to touch
 - `Cargo.toml`
 - `src/client/types.rs` (new file)
 - `src/client/mod.rs` (new file)
+- `src/main.rs`
 - `src/app.rs`
 
 ---
@@ -32,15 +33,21 @@ gpui_platform = { git = "https://github.com/egoist/zed", branch = "waku-webview"
     "x11",
 ] }
 anyhow = "1"
-reqwest = { version = "0.12", features = ["json", "stream"] }
-tokio = { version = "1", features = ["full"] }
+reqwest_client = { git = "https://github.com/egoist/zed", branch = "waku-webview" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-futures-util = "0.3"
+futures = "0.3"
 ```
 
 > **Rust concept:** `features`
-> Crates can have optional parts. `tokio = { features = ["full"] }` enables all of tokio's capabilities, including the runtime we need for HTTP.
+> Crates can have optional parts that you switch on. `serde = { features = ["derive"] }` turns on the derive macros, which is what lets `#[derive(Deserialize)]` work.
+
+**Why not `reqwest` and `tokio`?** The obvious move is to add `reqwest` for HTTP and `tokio` for async. Don't. GPUI already ships an HTTP abstraction and its own async executor, and `reqwest_client` is the adapter that plugs the two together. Adding `reqwest` directly would give you a second, disconnected HTTP stack.
+
+Notice the four new crates are all *already* in `Cargo.lock` — `gpui` pulls them in transitively. Adding them as direct dependencies unlocks their APIs without pulling in anything new.
+
+> **Rust concept:** a *direct* dependency vs a *transitive* one
+> A transitive dependency exists in the build graph but is not visible to your code. You cannot write `use serde::...` unless `serde` is listed in your own `Cargo.toml`. The crate is already compiled; you are just asking for permission to name it.
 
 ---
 
@@ -79,7 +86,10 @@ pub struct SessionTime {
 > Tells serde how to convert JSON into this struct. It auto-generates parsing code.
 
 > **Rust concept:** `#[serde(rename = "projectID")]`
-> Maps the Rust field `project_id` to the JSON key `projectID`.
+> Maps the Rust field `project_id` to the JSON key `projectID`. Rust naming convention is `snake_case`; the API uses `camelCase`. The attribute bridges the two without renaming your field.
+
+> **Rust concept:** `#[derive(Serialize)]` as well as `Deserialize`
+> `Health` only ever arrives from the server, so it needs `Deserialize` alone. `Session` is both received and (later) sent, so it derives both.
 
 ---
 
@@ -88,95 +98,109 @@ pub struct SessionTime {
 ```rust
 pub mod types;
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
-use reqwest::{Client, Url};
+use futures::AsyncReadExt;
+use gpui::http_client::{AsyncBody, HttpClient, Json, Url};
 
 pub use types::{Health, Session};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpencodeClient {
-    http: Client,
+    http: Arc<dyn HttpClient>,
     base: Url,
 }
 
 impl OpencodeClient {
-    pub fn new(base: Url, username: &str, password: Option<&str>) -> Result<Self> {
-        let mut headers = HeaderMap::new();
-        if let Some(pw) = password {
-            let creds = format!("{username}:{pw}");
-            let encoded = base64_encode(&creds);
-            let val = HeaderValue::from_str(&format!("Basic {encoded}"))?;
-            headers.insert(AUTHORIZATION, val);
-        }
-        let http = Client::builder()
-            .default_headers(headers)
-            .build()
-            .context("build reqwest client")?;
-        Ok(Self { http, base })
+    pub fn new(base: Url, http: Arc<dyn HttpClient>) -> Self {
+        Self { http, base }
+    }
+
+    pub fn base_url(&self) -> &Url {
+        &self.base
+    }
+
+    fn url(&self, path: &str) -> Result<Url> {
+        self.base
+            .join(path)
+            .with_context(|| format!("join {path} onto {}", self.base))
     }
 
     pub async fn health(&self) -> Result<Health> {
-        let url = self.base.join("/global/health")?;
-        let h = self
+        let url = self.url("/global/health")?;
+        let response = self
             .http
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<Health>()
-            .await?;
-        Ok(h)
+            .get(url.as_str(), AsyncBody::empty(), true)
+            .await
+            .context("GET /global/health")?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("GET /global/health -> {}", response.status());
+        }
+
+        let mut body = String::new();
+        response
+            .into_body()
+            .read_to_string(&mut body)
+            .await
+            .context("read health body")?;
+
+        serde_json::from_str(&body).context("parse health JSON")
     }
 
-    pub async fn create_session(&self, title: Option<&str>) -> Result<Session> {
-        let url = self.base.join("/session")?;
-        let body = serde_json::json!({ "title": title });
-        let s = self
-            .http
-            .post(url)
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<Session>()
-            .await?;
-        Ok(s)
-    }
-}
+    pub async fn create_session(&self, title: &str) -> Result<Session> {
+        #[derive(serde::Serialize)]
+        struct NewSession<'a> {
+            title: &'a str,
+        }
 
-fn base64_encode(input: &str) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = input.as_bytes();
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
-        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
-        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[((n >> 6) & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[(n & 0x3f) as usize] as char
-        } else {
-            '='
-        });
+        let url = self.url("/session")?;
+        let payload = NewSession { title };
+        let response = self
+            .http
+            .post_json(url.as_str(), Json(&payload).into())
+            .await
+            .context("POST /session")?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("POST /session -> {}", response.status());
+        }
+
+        let mut body = String::new();
+        response
+            .into_body()
+            .read_to_string(&mut body)
+            .await
+            .context("read session body")?;
+
+        serde_json::from_str(&body).context("parse session JSON")
     }
-    out
 }
 ```
 
+A few things to notice, because each one is a decision:
+
+**`Arc<dyn HttpClient>`, not a concrete type.** `HttpClient` is a trait. GPUI hands you a trait object so the app does not care which implementation is behind it. `dyn` means "some type implementing this trait, decided at runtime." `Arc` is a reference-counted pointer so several owners can share one client. In TypeScript this is an interface-typed value; there is no `dyn` keyword because interfaces are structural.
+
+**The client does not create the HTTP client.** It receives one. That is dependency injection, and it is why `OpencodeClient::new` cannot fail and returns `Self` rather than `Result<Self>`.
+
+**No auth.** The local `opencode serve` needs none. Basic auth is deferred to a later phase rather than carried as dead code.
+
 > **Rust concept:** `Result<T>`
-> A value that is either `Ok(T)` (success) or `Err(error)` (failure). The `?` operator propagates errors upward.
+> A value that is either `Ok(T)` (success) or `Err(error)` (failure). The `?` operator propagates errors upward, like `throw`.
+
+> **Rust concept:** `.context(...)` and `anyhow`
+> `anyhow::Context` attaches a human-readable message to an error as it travels up. Without it you get "connection refused"; with it you get "GET /global/health: connection refused". The `{e:#}` format in later steps prints that whole chain.
 
 > **Rust concept:** `async` / `await`
 > Marks a function as asynchronous and pauses it at `.await` until the operation finishes. Like JavaScript `async/await`.
+
+> **Rust concept:** `response.into_body()`
+> `into_` means "consume and convert." The response is taken apart, and its body is all that remains.
+
+> **Rust concept:** `read_to_string(&mut body)`
+> `&mut` here is a *mutable borrow*: the function writes into `body` without owning it. In JavaScript you would pass an array and push into it.
 
 ---
 
@@ -190,13 +214,70 @@ mod client;
 
 ---
 
-## Step 5: Store session and client in `KakuApp`
+## Step 5: Install a real HTTP client — do not skip this
+
+This is the step that silently ruins the phase if you miss it.
+
+`gpui_platform::application()` installs a stub HTTP client. Every request through it fails at runtime with `No HttpClient available`. **There is no compiler error** — the types all line up, and the app runs fine until it tries to talk to the network.
+
+Replace `main` in `src/main.rs` with:
+
+```rust
+use std::sync::Arc;
+
+use gpui::*;
+use gpui_platform::application;
+use reqwest_client::ReqwestClient;
+
+fn main() {
+    application()
+        .with_http_client(Arc::new(ReqwestClient::new()))
+        .run(|cx: &mut App| {
+            cx.bind_keys([KeyBinding::new("enter", SendPrompt, Some(("KakuApp")))]);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                        None,
+                        size(px(900.0), px(640.0)),
+                        cx,
+                    ))),
+                    window_min_size: Some(size(px(600.0), px(400.0))),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let app = KakuApp::new(window, cx);
+                    let focus = app.focus_handle(cx).clone();
+                    window.focus(&focus, cx);
+                    app
+                },
+            )
+            .expect("failed to open main window");
+        });
+}
+```
+
+The change is the two lines on `application()`. `.with_http_client(...)` returns the `Application` back, so it chains before `.run(...)`.
+
+> **Rust concept:** builder pattern
+> `Application` is configured by chaining methods that each return `Self`. It is the same shape as `div().flex().gap(...)` from Phases 01 and 02.
+
+> **Rust concept:** `Arc::new(...)`
+> Wraps a value in a reference-counted pointer. `with_http_client` wants to share one client across the app, and `Arc` is how Rust shares ownership. React analogy: passing one shared object down through context instead of constructing a new one per component.
+
+**`ReqwestClient` contains a tokio runtime.** You will not write `tokio` anywhere. The client owns its runtime internally and runs its own requests on it. That is the whole reason to use this adapter instead of wiring up an HTTP client by hand.
+
+---
+
+## Step 6: Store session and client in `KakuApp`
 
 In `src/app.rs`, add imports:
 
 ```rust
 use crate::client::{OpencodeClient, Session};
+use gpui::http_client::Url;
 ```
+
+`Url` is not in `gpui::*`. It comes from the `http_client` module that `gpui` re-exports, and it is the same `Url` type `OpencodeClient::new` expects — which is why it is imported from there rather than from a `url` crate.
 
 Add fields:
 
@@ -231,11 +312,11 @@ cx.new(|cx| {
 ```
 
 > **Rust concept:** `Option<T>`
-> A value that may or may not exist. `Some(T)` = exists, `None` = missing. Like `T | null` in TypeScript.
+> A value that may or may not exist. `Some(T)` = exists, `None` = missing. Like `T | null` in TypeScript, except the compiler forces you to handle the `None` case before you can read the value.
 
 ---
 
-## Step 6: Connect on startup
+## Step 7: Connect on startup
 
 In `src/app.rs`, add a `connect` method:
 
@@ -244,13 +325,8 @@ impl KakuApp {
     fn connect(&mut self, cx: &mut Context<Self>) {
         let base = std::env::var("KAKU_GUI_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:4096".to_string());
-        let password = std::env::var("KAKU_GUI_PASSWORD")
-            .ok()
-            .or_else(|| std::env::var("OPENCODE_SERVER_PASSWORD").ok());
-        let username = std::env::var("OPENCODE_SERVER_USERNAME")
-            .unwrap_or_else(|_| "opencode".to_string());
 
-        let url: reqwest::Url = match base.parse() {
+        let url = match Url::parse(&base) {
             Ok(u) => u,
             Err(e) => {
                 self.status = Status::Error(format!("invalid URL: {e}"));
@@ -259,55 +335,40 @@ impl KakuApp {
             }
         };
 
-        let client = match OpencodeClient::new(url, &username, password.as_deref()) {
-            Ok(c) => c,
-            Err(e) => {
-                self.status = Status::Error(format!("client: {e:#}"));
-                cx.notify();
-                return;
-            }
-        };
+        let client = OpencodeClient::new(url, cx.http_client());
 
-        cx.spawn(|this, mut cx| async move {
+        cx.spawn(async move |this, cx| {
             let result = async {
                 client.health().await?;
-                let session = client.create_session(Some("kaku-gui")).await?;
+                let session = client.create_session("kaku-gui").await?;
                 Ok::<_, anyhow::Error>((client, session))
             }
             .await;
 
-            cx.update(|cx| {
-                this.update(cx, |this, cx| {
-                    match result {
-                        Ok((client, session)) => {
-                            this.client = Some(client);
-                            this.session = Some(session);
-                            this.status = Status::Idle;
-                        }
-                        Err(e) => {
-                            this.status = Status::Error(format!("connect: {e:#}"));
-                        }
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok((client, session)) => {
+                        this.client = Some(client);
+                        this.session = Some(session);
+                        this.status = Status::Idle;
                     }
-                    cx.notify();
-                })
-                .ok();
-            })
-            .ok();
+                    Err(e) => {
+                        this.status = Status::Error(format!("connect: {e:#}"));
+                    }
+                }
+                cx.notify();
+            });
         })
         .detach();
     }
 }
 ```
 
-Call it at the end of `KakuApp::new`:
+Note that the closure binds the component as `this`, not `self`. Inside the spawned task, `self` does not exist — writing `self.status = ...` there fails with `error[E0425]: cannot find value 'self' in this scope`. The task only has `this`, a `WeakEntity<KakuApp>`.
 
-```rust
-let mut app = cx.new(|cx| { ... });
-app.update(cx, |this, cx| this.connect(cx));
-app
-```
+That is the whole point of `this.update(cx, ...)`: the async task cannot touch the component directly, so it asks the entity to run a closure that does.
 
-Wait — `KakuApp::new` currently returns `Entity<Self>` directly. We need to capture it, call connect, then return it. Change `KakuApp::new` to:
+Call `connect` at the end of `KakuApp::new`:
 
 ```rust
 pub fn new(_window: &mut Window, cx: &mut App) -> Entity<Self> {
@@ -330,21 +391,26 @@ pub fn new(_window: &mut Window, cx: &mut App) -> Entity<Self> {
 }
 ```
 
-> **Rust concept:** `cx.spawn(...)`
-> Runs an async task on GPUI's background executor. Network calls must not block the UI thread, so we run them here.
+> **Rust concept:** `cx.http_client()`
+> Returns the client you installed in Step 5, as `Arc<dyn HttpClient>`. It is defined on `App`, and `Context<T>` derefs to `App`, so it is reachable from both.
 
-> **Rust concept:** `move`
-> The closure takes ownership of `client` so it can be used inside the async task.
+> **Rust concept:** `cx.spawn(async move |this, cx| { ... })`
+> Starts an async task tied to this component. `this` is a `WeakEntity<Self>` — a handle that does not keep the component alive. The `async move` captures `client` by value so the task owns it.
+>
+> **Use exactly this closure shape.** The similar-looking `cx.spawn(|this, cx| async move { ... })` does not compile (`E0282: type annotations needed`). The async-closure form is the one the GPUI examples use.
 
-> **Rust concept:** `async move { ... }.await`
-> The block inside `cx.spawn` is async. We `.await` the network calls.
+> **Rust concept:** `.detach()`
+> A `Task` is cancelled when dropped. `.detach()` says "let this run to completion, I am not holding the handle." Without it, the task would be dropped immediately and the request would never happen.
 
 > **Rust concept:** `this.update(cx, |this, cx| { ... })`
-> After the network call finishes, we safely update the `KakuApp` entity back on the UI thread.
+> Schedules a closure to run against the component on the UI thread. Returns a `Result`, because the component may already be gone — hence the leading `let _ =`. Network work happens off the UI thread; the state change happens on it.
+
+> **Rust concept:** `Ok::<_, anyhow::Error>((client, session))`
+> The turbofish `::<_, anyhow::Error>` names the types the compiler cannot infer: the success type is inferred from the tuple, and the error type is stated explicitly. Without it the `?` inside the async block has no error type to convert into.
 
 ---
 
-## Step 7: Show connection status
+## Step 8: Show connection status
 
 Update `render_status_bar` so it also shows the session ID when connected:
 
@@ -379,6 +445,12 @@ fn render_status_bar(&self, status: Status, theme: Theme) -> impl IntoElement {
 }
 ```
 
+> **Rust concept:** `.as_ref().map(...)`
+> `as_ref()` turns `Option<Session>` into `Option<&Session>` so nothing is moved. `map` transforms the value if present, and `unwrap_or_else` supplies the fallback.
+
+> **Rust concept:** `.unwrap_or_else(|| ...)`
+> Like `.unwrap_or(...)` except the fallback is a function, so the default string is only built when it is actually needed.
+
 ---
 
 ## Verify
@@ -391,11 +463,13 @@ fn render_status_bar(&self, status: Status, theme: Theme) -> impl IntoElement {
    ```bash
    cargo run
    ```
-3. The status bar should change from "Ready — not connected" to "Ready — <session-id>".
+3. The status bar should change from "Ready — not connected" to "Ready — ses_…".
 
 ## Common pitfall
 
-If you see "invalid URL" or "connect: ...", check that `opencode serve` is running on `http://127.0.0.1:4096`.
+If the status bar shows an error containing `No HttpClient available`, Step 5 was skipped — `.with_http_client(...)` is missing from `main.rs`. The full message reads `connect: GET /global/health: No HttpClient available`.
+
+If it says `invalid URL` or a connection error, check that `opencode serve` is running on `http://127.0.0.1:4096`.
 
 ---
 

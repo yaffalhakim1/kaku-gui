@@ -19,7 +19,7 @@ Support local-only slash commands: `/clear`, `/model`, and `/quit`.
 ## Step 1: Create `src/commands.rs`
 
 ```rust
-use crate::app::{KakuApp, Status};
+use crate::app::KakuApp;
 use gpui::Context;
 
 #[derive(Clone, Debug)]
@@ -57,7 +57,12 @@ impl KakuApp {
                 cx.notify();
             }
             Command::Model(model) => {
-                self.status = Status::Error(format!("model override set to: {model}"));
+                // Local echo only. Actually switching models needs the
+                // `/api/session/{id}/model` endpoint, which is out of scope here.
+                self.messages.push(crate::app::DisplayMessage {
+                    role: crate::app::Role::System,
+                    text: format!("model override set to: {model}"),
+                });
                 cx.notify();
             }
             Command::Quit => {
@@ -146,9 +151,6 @@ If commands are sent to OpenCode instead of running locally, make sure the `text
 
 ---
 
-Congratulations! You have completed the core kaku-gui tutorial.
+Once commands work, move to **Phase 08: Waku-Inspired UI/UX Polish**.
 
-From here you can explore:
-- Phase 08 (advanced): render markdown, code blocks, and reasoning.
-- Persist sessions to disk.
-- Add a sidebar for multiple sessions.
+**Markdown and reasoning rendering stay out of scope.** Phase 08 is a visual polish pass, not a rendering-engine phase.

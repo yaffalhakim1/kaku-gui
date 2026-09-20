@@ -245,6 +245,114 @@ Three ways to loop a `Vec`, and they differ by ownership:
 
 ---
 
+## Phase 02: Text Input
+
+**Result:** the placeholder input bar is a real text field. Typing works, Enter submits, the input clears.
+
+`src/input.rs` introduces `TextInput` as its own component:
+
+```rust
+pub struct TextInput {
+    focus_handle: FocusHandle,
+    content: SharedString,
+}
+```
+
+### A child component is just another Entity
+
+`KakuApp` does not own a `TextInput`. It owns an `Entity<TextInput>`:
+
+```rust
+input: Entity<TextInput>,
+```
+
+`cx.new(|cx| TextInput::new(cx))` allocates the child on GPUI's heap and hands back a handle. The parent holds the handle, not the value. React analogy: the parent holds a ref to a child instance, not a copy of the child's state.
+
+That matters because the parent needs to read the text at submit time and clear it afterward. Holding a handle makes both possible without moving anything.
+
+### `FocusHandle` and `track_focus`
+
+`FocusHandle` is a handle to "who currently has keyboard focus." `TextInput` creates one with `cx.focus_handle()` and claims it in render:
+
+```rust
+.track_focus(&self.focus_handle)
+```
+
+`track_focus` is what routes keystrokes to this element. Without it, `on_key_down` never fires and the app looks broken while compiling fine. This is the first of several GPUI problems that produce no compiler error.
+
+The window also has to give focus to something at startup, which is why `main.rs` calls `window.focus(&focus, cx)` with the root component's handle.
+
+### Keystrokes arrive as `KeyDownEvent`
+
+```rust
+.on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+    if let Some(c) = event.keystroke.key_char.as_ref() {
+        if c.len() == 1 && !event.keystroke.modifiers.shift {
+            this.content = format!("{}{}", this.content, c).into();
+            cx.notify();
+        }
+    }
+    if event.keystroke.key == "backspace" {
+        let mut s = this.content.to_string();
+        s.pop();
+        this.content = s.into();
+        cx.notify();
+    }
+}))
+```
+
+Two things worth naming. `cx.listener(...)` is what makes `this` available — the closure receives the component itself, like an event handler bound to a component instance rather than a free function. And every mutation ends with `cx.notify()`, which is the `setState` equivalent: without it the state changes and the UI never redraws.
+
+`Backspace` has no `key_char`, so it is handled by `key` instead.
+
+The `!event.keystroke.modifiers.shift` guard is worth understanding before trusting it. On Windows, `key_char` is produced by `ToUnicode` using the live keyboard state, so Shift+A arrives as `key_char = Some("S")` with `modifiers.shift == true`. The guard therefore *rejects* shifted characters — **capital letters cannot be typed yet.** That is a known limitation of this phase, not a feature. Real text input needs `EntityInputHandler`, which is what GPUI's own `examples/input.rs` uses. Replacing this hand-rolled `on_key_down` handler is future work, not Phase 03.
+
+### `SharedString` instead of `String`
+
+`content` is a `SharedString`, not a `String`. It is a cheaply-cloneable, refcounted string — GPUI wants text that can be handed to the renderer without copying. `format!(...).into()` converts a `String` into one, and `self.content.to_string()` goes the other way.
+
+The `.into()` calls look like noise until you notice the field type is not `String`. Every assignment has to produce a `SharedString`.
+
+### Actions: `SendPrompt`
+
+Enter is not wired directly to a callback. It goes through an action:
+
+```rust
+actions!(kaku_gui, [SendPrompt]);
+```
+
+then in `main.rs`:
+
+```rust
+cx.bind_keys([KeyBinding::new("enter", SendPrompt, Some(("KakuApp")))]);
+```
+
+and in `render`:
+
+```rust
+div()
+    .key_context("KakuApp")
+    .on_action(cx.listener(Self::send_prompt_action))
+```
+
+Three pieces have to line up: the key binding, the `key_context` on the focused subtree, and an `on_action` handler inside that context. Drop any one and Enter silently does nothing.
+
+The reason to use an action rather than `on_key_down` here is separation: the keymap decides *which* keys trigger submission, and the handler only knows *that* submission happened. Rebinding to `ctrl+enter` later is a one-line change in `main.rs` and touches no UI code. This is the same reason React apps route shortcuts through a command layer instead of scattering `keydown` listeners.
+
+The handler reads the child's state through its handle, then pushes to its own `messages`:
+
+```rust
+let content = self.input.read(cx).content().clone();
+```
+
+`self.input.read(cx)` borrows the child component immutably. `.clone()` is needed because the borrow ends when the expression does, and `content()` returns a reference into the child.
+
+### Why `main.rs` also changed
+
+`mod input;` registers the new module, and the window now focuses `KakuApp` instead of nothing. Phase 02 touched `main.rs` and `app.rs` as well as adding `input.rs`.
+
+---
+
 ## Misconceptions
 
 ### "`Copy` is earned by using a type a lot"
@@ -298,6 +406,20 @@ Rust references behave differently. The compiler tracks how long each one lives 
 | `.into_iter()` | consume a collection, yield owned items |
 | `.children()` | render many elements at once |
 | `px(v)` | a length value |
+| `Action` | a named, rebindable command (`SendPrompt`) |
+| `actions!(...)` | macro declaring a set of actions |
+| `KeyBinding::new` | maps a keystroke to an action |
+| `.key_context(...)` | names a subtree so keybindings can target it |
+| `.on_action(...)` | handles an action dispatched in this context |
+| `cx.listener(...)` | closure that receives the component as its first argument |
+| `cx.notify()` | tell GPUI to re-render this component |
+| `cx.new(...)` | allocate a child component, get an `Entity<T>` back |
+| `.read(cx)` | borrow a child component immutably |
+| `.update(cx, ...)` | borrow a child component mutably |
+| `track_focus` | route keyboard input to this element |
+| `SharedString` | cheaply-cloneable refcounted text |
+| `KeyDownEvent` | a key press delivered to a focused element |
+| `key_char` | the character a keystroke would type, if any |
 
 ---
 

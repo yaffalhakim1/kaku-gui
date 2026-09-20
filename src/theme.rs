@@ -1,7 +1,7 @@
 use gpui::*;
 
-/// kaku color palette ported from kaku-tui/src/theme.rs.
-/// All colors are RGB so GPUI's opacity modifiers work later.
+/// The kaku dark palette. Colors are declared as RGB and converted to Hsla,
+/// which is what GPUI's style methods want.
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
     pub background: Hsla,

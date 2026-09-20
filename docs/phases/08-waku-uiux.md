@@ -173,6 +173,7 @@ fn render_messages(&self, messages: Vec<DisplayMessage>, theme: Theme) -> impl I
         .flex()
         .flex_col()
         .overflow_y_scroll()
+        .track_scroll(&self.scroll_handle)
         .child(
             div()
                 .w_full()
@@ -265,9 +266,11 @@ fn render_input_bar(&self, _status: Status, theme: Theme) -> impl IntoElement {
 
 Update `src/input.rs` so the input blends into the composer:
 
+Keep the whole `render` method from Phase 02 and change **only** the styling calls. The `track_focus` and `on_key_down` parts are load-bearing — drop either and the field stops accepting keystrokes.
+
 ```rust
 impl Render for TextInput {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_1()
             .h(px(24.0))
@@ -277,11 +280,25 @@ impl Render for TextInput {
             .text_color(rgb(0xd5d4d6))
             .child(self.content.clone())
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if let Some(c) = event.keystroke.key_char.as_ref() {
+                    if c.len() == 1 && !event.keystroke.modifiers.shift {
+                        this.content = format!("{}{}", this.content, c).into();
+                        cx.notify();
+                    }
+                }
+                if event.keystroke.key == "backspace" {
+                    let mut s = this.content.to_string();
+                    s.pop();
+                    this.content = s.into();
+                    cx.notify();
+                }
+            }))
     }
 }
 ```
 
-The composer now provides the border and background, so the input itself is just text.
+The composer now provides the border and background, so the input itself is just text. Note the parameter is `cx`, not `_cx`, because the key handler needs it.
 
 ---
 
@@ -291,11 +308,8 @@ Replace the root `render` method with:
 
 ```rust
 fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    if let Some(rx) = self.events.take() {
-        while let Ok(ev) = rx.try_recv() {
-            self.apply_event(ev, cx);
-        }
-        self.events = Some(rx);
+    while let Some(event) = self.events.as_ref().and_then(|rx| rx.try_recv().ok()) {
+        self.apply_event(event, cx);
     }
 
     let theme = self.theme;

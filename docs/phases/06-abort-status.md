@@ -39,15 +39,23 @@ In `src/client/mod.rs`, add:
 
 ```rust
 pub async fn abort(&self, session_id: &str) -> Result<()> {
-    let url = self.base.join(&format!("/session/{session_id}/abort"))?;
-    self.http
-        .post(url)
-        .send()
-        .await?
-        .error_for_status()?;
+    let url = self.url(&format!("/session/{session_id}/abort"))?;
+
+    let response = self
+        .http
+        .post_json(url.as_str(), AsyncBody::empty())
+        .await
+        .context("POST abort")?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("POST abort -> {}", response.status());
+    }
+
     Ok(())
 }
 ```
+
+`AsyncBody::empty()` is the empty request body. `post_json` sets `Content-Type: application/json` even when the body is empty, which this endpoint accepts.
 
 ---
 
@@ -100,18 +108,13 @@ fn abort_action(&mut self, _: &Abort, _window: &mut Window, cx: &mut Context<Sel
     self.abort_requested = true;
     cx.notify();
 
-    cx.spawn(|_this, mut cx| async move {
-        let result = client.abort(&session_id).await;
-        cx.update(|cx| {
-            _this.update(cx, |this, cx| {
-                if let Err(e) = result {
-                    this.status = Status::Error(format!("abort: {e:#}"));
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .ok();
+    cx.spawn(async move |this, cx| {
+        if let Err(e) = client.abort(&session_id).await {
+            let _ = this.update(cx, |this, cx| {
+                this.status = Status::Error(format!("abort: {e:#}"));
+                cx.notify();
+            });
+        }
     })
     .detach();
 }
@@ -136,26 +139,9 @@ StreamEvent::Idle => {
 
 ---
 
-## Step 5: Auto-scroll the message list
+## Step 5: Make the transcript scroll
 
-Replace `render_messages` with a version that keeps the list scrolled. For this phase, we will simply reverse the display so new messages appear at the bottom naturally, or use a `ScrollHandle`.
-
-Simpler approach: add an `id` to the messages container and a `ScrollHandle`. For now, add a `ScrollHandle` field:
-
-```rust
-pub struct KakuApp {
-    ...
-    scroll_handle: ScrollHandle,
-}
-```
-
-Initialize:
-
-```rust
-scroll_handle: ScrollHandle::new(),
-```
-
-Update `render_messages`:
+The transcript currently grows past the window with no way to scroll. Fix `render_messages`:
 
 ```rust
 fn render_messages(&self, messages: Vec<DisplayMessage>, theme: Theme) -> impl IntoElement {
@@ -168,47 +154,54 @@ fn render_messages(&self, messages: Vec<DisplayMessage>, theme: Theme) -> impl I
         .p(px(16.0))
         .overflow_y_scroll()
         .track_scroll(&self.scroll_handle)
-        .children(messages.into_iter().map(move |m| self.render_message(m, theme)))
+        .children(
+            messages
+                .into_iter()
+                .map(move |m| self.render_message(m, theme)),
+        )
 }
 ```
 
-In `apply_event`, after updating messages, scroll to bottom:
+Add the field and initialize it:
 
 ```rust
-self.scroll_handle.scroll_to_end(cx);
+scroll_handle: ScrollHandle,
 ```
 
-Wait — `apply_event` takes `&mut Context<Self>`, and `scroll_to_end` likely needs `&mut Window`. Since `apply_event` is called from `render`, we don't have `Window` there.
-
-For this phase, skip auto-scroll and just make sure new messages render. Add a TODO comment:
-
 ```rust
-// TODO: auto-scroll requires passing Window into apply_event or using a subscription.
+scroll_handle: ScrollHandle::new(),
 ```
 
-Instead, we can use `contain_scroll` or just let the layout push content down.
+**`.id("messages")` is required.** `overflow_y_scroll()` and `track_scroll()` are defined on `StatefulInteractiveElement`, not on `Styled`. Without `.id(...)`, `div()` is a plain `Div` and neither method exists:
 
-Actually, the simplest working scroll is to use `overflow_y_scroll()` on the messages container. New content will appear and the user can scroll manually. Auto-scroll can be a later polish.
+```
+error[E0599]: no method named `overflow_y_scroll` found for struct `gpui::Div`
+```
 
-So update `render_messages` to:
+Calling `.id(...)` promotes the element to a `Stateful<Div>`, which is what Phase 01's notes meant by "`div().id(...)` returns `Stateful<E>`".
+
+> **Rust concept:** why `.id(...)` is needed at all
+> Scrolling is stateful — GPUI has to remember the offset between frames. An element with no identity cannot be found in the next frame, so it cannot hold state. The `id` is the key GPUI uses to look the element up.
+
+### Auto-scrolling to the bottom
+
+`ScrollHandle::scroll_to_item(ix)` marks which child should be scrolled into view, and it takes no `Window`. Add to `apply_event`, at the end of the `TextDelta` arm:
 
 ```rust
-fn render_messages(&self, messages: Vec<DisplayMessage>, theme: Theme) -> impl IntoElement {
-    div()
-        .flex_1()
-        .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .p(px(16.0))
-        .overflow_y_scroll()
-        .children(messages.into_iter().map(move |m| self.render_message(m, theme)))
+StreamEvent::TextDelta { text } => {
+    if let Some(idx) = self.streaming_idx {
+        if let Some(message) = self.messages.get_mut(idx) {
+            message.text = text;
+            self.scroll_handle.scroll_to_item(idx);
+        }
+    }
 }
 ```
 
-If `overflow_y_scroll()` is not available in your GPUI version, use `.overflow_hidden()` and revisit later.
+`scroll_to_item` only records the intent; GPUI applies it during the next prepaint. That is why it works from `render`'s call chain without a `Window`.
 
----
-
+> **Rust concept:** `&self` on `scroll_to_item`
+> The method takes `&self`, not `&mut self`, because the handle wraps an `Rc<RefCell<...>>` internally. Interior mutability lets it mutate shared state through a shared reference. It is the same trick as `Entity<T>`: a handle that manages its own mutability.
 ## Step 6: Status bar polish
 
 Update the status bar to show a small dot when busy:
@@ -222,8 +215,8 @@ fn render_status_bar(&self, status: Status, theme: Theme) -> impl IntoElement {
         .unwrap_or_else(|| "not connected".to_string());
 
     let (label, dot_color) = match status {
-        Status::Idle => (format!("Ready — {session_id}"), theme.success),
-        Status::Busy => ("Thinking…".to_string(), theme.accent),
+        Status::Idle => (format!("Ready — {session_id}"), theme.accent),
+        Status::Busy => ("Thinking…".to_string(), theme.text),
         Status::Error(ref e) => (format!("Error: {e}"), theme.user),
     };
 
@@ -251,7 +244,9 @@ fn render_status_bar(&self, status: Status, theme: Theme) -> impl IntoElement {
 }
 ```
 
-> **Web analogy:** `.rounded_full()` ≈ `border-radius: 9999px`.
+> **Web analogy:** `.rounded_full()` ≈ `border-radius: 9999px`. `.size(px(6.0))` sets width and height together, like `width: 6px; height: 6px`.
+
+> **Note:** this uses only colors that already exist on `Theme` (`accent`, `text`, `user`). Adding a `success` color is a Phase 08 concern, where the theme gains semantic roles.
 
 ---
 

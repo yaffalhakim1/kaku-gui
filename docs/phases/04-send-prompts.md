@@ -17,26 +17,54 @@ When you press Enter, the app sends your message to OpenCode and pre-creates an 
 
 ## Step 1: Add `send_prompt` to the client
 
-Open `src/client/mod.rs` and add this method inside `impl OpencodeClient`:
+Open `src/client/mod.rs`. `Json` and `Context` are already imported from Phase 03, so add this method inside `impl OpencodeClient`:
 
 ```rust
 pub async fn send_prompt(&self, session_id: &str, text: &str) -> Result<()> {
-    let url = self.base.join(&format!("/session/{session_id}/prompt_async"))?;
-    let body = serde_json::json!({
-        "parts": [{ "type": "text", "text": text }],
-    });
-    self.http
-        .post(url)
-        .json(&body)
-        .send()
-        .await?
-        .error_for_status()?;
+    #[derive(serde::Serialize)]
+    struct PromptBody<'a> {
+        parts: [TextPart<'a>; 1],
+    }
+
+    #[derive(serde::Serialize)]
+    struct TextPart<'a> {
+        #[serde(rename = "type")]
+        type_: &'static str,
+        text: &'a str,
+    }
+
+    let url = self.url(&format!("/session/{session_id}/prompt_async"))?;
+    let payload = PromptBody {
+        parts: [TextPart {
+            type_: "text",
+            text,
+        }],
+    };
+
+    let response = self
+        .http
+        .post_json(url.as_str(), Json(&payload).into())
+        .await
+        .context("POST prompt_async")?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("POST prompt_async -> {}", response.status());
+    }
+
     Ok(())
 }
 ```
 
+> **Rust concept:** `#[serde(rename = "type")]`
+> `type` is a reserved word in Rust, so the field cannot be called that. `type_` with a rename attribute is the convention for this exact situation. Phase 05's `SseWrapper` does the same thing.
+
+> **Rust concept:** `[TextPart<'a>; 1]`
+> A fixed-size array of exactly one element. `parts` is required by the API but only ever holds one text part here, so an array states that precisely. `Vec<TextPart>` would also work.
+
 > **Rust concept:** `&format!("/session/{session_id}/prompt_async")`
 > Builds a URL path string. `format!` is like JavaScript's template literal.
+>
+> Note `self.url(...)` rather than `self.base.join(...)`: `url` is the private helper from Phase 03 that joins and attaches context to the error. Use it consistently so failures name the request that failed.
 
 ---
 
@@ -108,18 +136,15 @@ fn send_prompt_action(
     self.input.update(cx, |input, cx| input.clear(cx));
     cx.notify();
 
-    cx.spawn(|this, mut cx| async move {
+    cx.spawn(async move |this, cx| {
         let result = client.send_prompt(&session_id, &text).await;
 
-        cx.update(|cx| {
-            this.update(cx, |this, _cx| {
-                if let Err(e) = result {
-                    this.status = Status::Error(format!("send: {e:#}"));
-                }
-            })
-            .ok();
-        })
-        .ok();
+        if let Err(e) = result {
+            let _ = this.update(cx, |this, cx| {
+                this.status = Status::Error(format!("send: {e:#}"));
+                cx.notify();
+            });
+        }
     })
     .detach();
 }
@@ -128,8 +153,8 @@ fn send_prompt_action(
 > **Rust concept:** `let Some(session) = self.session.as_ref() else { ... };`
 > This is an `else` branch on `let`. If `session` is `None`, the code in `else` runs and returns early.
 
-> **Rust concept:** `clone()` on `Option<OpencodeClient>`
-> We clone the client so the async task can own it. `OpencodeClient` is `Clone`, so this is cheap.
+> **Rust concept:** `self.client.clone()`
+> `OpencodeClient` is `Clone`, and its fields are an `Arc` and a `Url` — so cloning it copies two pointers, not a connection pool. The clone exists because the async task must own what it uses, and the task outlives the `&mut self` borrow that produced it.
 
 ---
 
