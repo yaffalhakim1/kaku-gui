@@ -2,14 +2,18 @@
 // This file only opens the application window. Everything else lives in src/app.rs.
 
 mod app;
+mod input;
 mod theme;
 
+use crate::app::KakuApp;
 use gpui::*;
 use gpui_platform::application;
-use crate::app::KakuApp;
+
+actions!(kaku_gui, [SendPrompt]);
 
 fn main() {
     application().run(|cx: &mut App| {
+        cx.bind_keys([KeyBinding::new("enter", SendPrompt, Some(("KakuApp")))]);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(

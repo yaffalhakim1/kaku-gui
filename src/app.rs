@@ -1,6 +1,8 @@
 use gpui::*;
 
+use crate::input::TextInput;
 use crate::theme::Theme;
+use crate::SendPrompt;
 
 #[derive(Debug, Clone)]
 pub enum Role {
@@ -27,24 +29,29 @@ pub struct KakuApp {
     theme: Theme,
     messages: Vec<DisplayMessage>,
     status: Status,
+    input: Entity<TextInput>,
 }
 
 impl KakuApp {
     pub fn new(_window: &mut Window, cx: &mut App) -> Entity<Self> {
-        cx.new(|cx| Self {
-            focus_handle: cx.focus_handle(),
-            theme: Theme::dark(),
-            messages: vec![
-                DisplayMessage {
-                    role: Role::User,
-                    text: "Hello, who are you?".to_string(),
-                },
-                DisplayMessage {
-                    role: Role::Assistant,
-                    text: "I am an AI assistant running inside a native GPUI app.".to_string(),
-                },
-            ],
-            status: Status::Idle,
+        cx.new(|cx| {
+            let input = cx.new(|cx| TextInput::new(cx));
+            Self {
+                focus_handle: cx.focus_handle(),
+                theme: Theme::dark(),
+                messages: vec![
+                    DisplayMessage {
+                        role: Role::User,
+                        text: "Hello, who are you?".to_string(),
+                    },
+                    DisplayMessage {
+                        role: Role::Assistant,
+                        text: "I am an AI assistant running inside a native GPUI app.".to_string(),
+                    },
+                ],
+                status: Status::Idle,
+                input,
+            }
         })
     }
 }
@@ -83,6 +90,22 @@ impl KakuApp {
 }
 
 impl KakuApp {
+    fn send_prompt_action(&mut self, _: &SendPrompt, _window: &mut Window, cx: &mut Context<Self>) {
+        let content = self.input.read(cx).content().clone();
+        let text = content.to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        self.messages.push(DisplayMessage {
+            role: Role::User,
+            text: text.clone(),
+        });
+        self.input.update(cx, |input, cx| input.clear(cx));
+        cx.notify();
+    }
+}
+
+impl KakuApp {
     fn render_input_bar(&self, theme: Theme) -> impl IntoElement {
         div()
             .h(px(48.0))
@@ -94,17 +117,7 @@ impl KakuApp {
             .border_t_1()
             .border_color(theme.border)
             .child(div().text_color(theme.accent).child("› "))
-            .child(
-                div()
-                    .flex_1()
-                    .h(px(32.0))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.0))
-                    .bg(theme.surface)
-                    .child("Type a message..."),
-            )
+            .child(self.input.clone())
     }
 }
 
@@ -139,16 +152,18 @@ impl Focusable for KakuApp {
 }
 
 impl Render for KakuApp {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let messages = self.messages.clone();
         let status = self.status.clone();
 
         div()
+            .key_context("KakuApp")
             .size_full()
             .flex()
             .flex_col()
             .bg(theme.background)
+            .on_action(cx.listener(Self::send_prompt_action))
             .child(self.render_messages(messages, theme))
             .child(self.render_input_bar(theme))
             .child(self.render_status_bar(status, theme))
