@@ -15,10 +15,16 @@ This is a personal learning project, not production code.
 
 ## Workflow (MANDATORY)
 
-1. The project is split into phases under `docs/phases/`.
-2. Each session, the user picks ONE phase by saying something like:
+> Session pacing rule (added 2026-09-22): when a phase would introduce more
+> than ~4 new Rust concepts in one sitting, split it first (see the Phase
+> splitting convention below) and teach one part per sitting. The user found
+> the original 365-line Phase 03 too much for one sitting.
+
+1. The project is split into phases under `docs/phases/` (large phases are
+   split further into numbered parts — see the Phase splitting convention).
+2. Each session, the user picks ONE phase (or one part) by saying something like:
    - "read phase 01"
-   - "let's do phase 03"
+   - "let's do phase 03b"
    - "explain phase 00"
 3. The assistant MUST:
    - Read the requested phase markdown.
@@ -35,15 +41,30 @@ This is a personal learning project, not production code.
 - Phase 00: Recap the minimal scaffold (3 files: main.rs, app.rs, theme.rs).
 - Phase 01: Static chat layout.
 - Phase 02: Text input + submit on Enter.
-- Phase 03: Connect to OpenCode (health + session).
+- Phase 03: Connect to OpenCode (health + session) — **split into 03a/03b/03c** (see below).
 - Phase 04: Send prompts.
-- Phase 05: SSE streaming.
-- Phase 06: Abort, scroll, status polish.
+- Phase 05: SSE streaming — **split into 05a/05b/05c** (see below).
+- Phase 06: Abort, scroll, status polish — **split into 06a/06b** (see below).
 - Phase 07: Slash commands (/clear, /model, /quit).
 - Phase 08: Waku-inspired UI/UX polish (`docs/phases/08-waku-uiux.md`).
 - Markdown / reasoning rendering is OUT OF SCOPE until Phase 07 is done. It is not Phase 08.
 
-The phase files that exist today are `00-scaffold.md` through `08-waku-uiux.md`. Phase 00 is a _recap_ of a scaffold that already exists in `src/`; do not re-create it.
+The phase files that exist today are `00-scaffold.md` through `08-waku-uiux.md`, plus the split parts for Phases 03, 05, and 06. Phase 00 is a _recap_ of a scaffold that already exists in `src/`; do not re-create it.
+
+### Phase splitting convention (introduced 2026-09-22)
+
+Large phases are split into numbered parts (`03a-*.md`, `03b-*.md`, ...) when
+one sitting would introduce more than ~4 new Rust concepts. Rules:
+
+- The original file becomes a **pointer stub** listing the parts in order.
+- Each part is self-contained: it compiles on its own with 0 errors and ends
+  with its own verify step.
+- Each part carries a **status header** at the top (`completed` / `in progress`
+  with what remains / `not started`). A fresh session reads the header first.
+- `task.md` records the split and the current position.
+- Phases already split: **03** (03a client-types, 03b startup-connect,
+  03c status-bar), **05** (05a stream-plumbing, 05b read-stream,
+  05c stream-e2e), and **06** (06a abort, 06b scroll-status).
 
 **Progress through the roadmap lives in `task.md`.** This file does not track
 which phases are done or which source files exist; check `task.md` for both so
@@ -79,8 +100,13 @@ the two cannot drift apart.
   | `serde_json` | JSON parsing |
   | `futures` | `AsyncReadExt` / `AsyncBufReadExt` to read response bodies |
 
-  All seven are already in `Cargo.lock` via `gpui`, so adding them introduces
-  no new transitive tree. Anything outside this set still needs to be asked for.
+  **Dependency fact (corrected 2026-09-22):** six of the seven (`gpui`,
+  `gpui_platform`, `anyhow`, `serde`, `serde_json`, `futures`) ARE already in
+  `Cargo.lock` via `gpui`. `reqwest_client` is NOT — adding it brings roughly
+  78 new crates (tokio, zed-reqwest, hyper, h2, rustls, tower) and the first
+  `cargo check` takes about 1.5 minutes. It is still the only working
+  `HttpClient` impl in the fork, so it remains the right choice. Anything
+  outside this set still needs to be asked for.
 
 ## GPUI API rules (MANDATORY)
 

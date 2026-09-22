@@ -420,11 +420,105 @@ Rust references behave differently. The compiler tracks how long each one lives 
 | `SharedString` | cheaply-cloneable refcounted text |
 | `KeyDownEvent` | a key press delivered to a focused element |
 | `key_char` | the character a keystroke would type, if any |
+| `Arc<T>` | reference-counted shared pointer, thread-safe |
+| `dyn Trait` | "some type implementing this trait, chosen at runtime" |
+| trait | interface; defines required methods without implementations |
+| dependency injection | constructor receives its dependencies instead of creating them |
+| `::` vs `.` | `Type::f()` needs no instance; `x.f()` operates on one |
+| `Result<T>` | value that is `Ok(T)` or `Err(error)`; errors are values, not throws |
+| `?` | "if Err, return it now; if Ok, unwrap and continue" |
+| `.context(...)` | attach a human-readable message to an error (anyhow) |
+| `bail!` | return `Err(...)` from the function right now |
+| `async fn` | function returning a future; does nothing until polled |
+| `.await` | pause here until the future completes |
+| future | value representing work not yet done |
+| turbofish `::<_>` | explicitly name types the compiler cannot infer |
 
 ---
 
 ## Open questions
 
-- How to avoid the per-frame `messages.clone()` without adding lifetimes to `KakuApp`. Phase 06 territory.
-- Whether `.flex_1()` is the right tool for the transcript once the list scrolls. Phase 06 adds scrolling.
+- How to avoid the per-frame `messages.clone()` without adding lifetimes to `KakuApp`. Phase 06b territory.
+- Whether `.flex_1()` is the right tool for the transcript once the list scrolls. Phase 06b adds scrolling.
 
+---
+
+## Phase 03a: Client Types and HTTP Methods
+
+**Result:** `src/client/` with `types.rs` and `mod.rs` — `Health`, `Session`, `SessionTime` structs, and `OpencodeClient` with `health()` and `create_session()`. Compiles with 0 errors, 9 warnings (all expected: nothing constructs the client yet).
+
+Typed and verified 2026-09-22, against OpenCode 1.18.31 live (`/global/health` and `POST /session` response shapes confirmed with real requests).
+
+### Dependencies: the corrected story
+
+The AGENTS.md claim that all seven crates were "already in `Cargo.lock` via gpui" was **wrong for one of them**. Measured truth:
+
+- `anyhow`, `serde`, `serde_json`, `futures` — already in the lock via `gpui`. Adding them as direct dependencies is free: it grants naming permission, compiles nothing new.
+- `reqwest_client` — **not** in the lock. It brought **78 new crates** (tokio, zed-reqwest, hyper, h2, rustls, tower) and the first `cargo check` took ~1.5 min.
+
+The lock went from 707 to 787 packages. `reqwest_client` is still the right choice — it is the only working `HttpClient` impl in the pinned fork — but the "free" claim cost an afternoon of confusion in an earlier session.
+
+### The three new structs
+
+`Health` derives `Deserialize` only (it only ever arrives from the server). `Session` derives both `Serialize` and `Deserialize` (it will be sent later too). `#[serde(rename = "projectID")]` maps the camelCase JSON key onto the snake_case Rust field without renaming the field.
+
+Serde **ignores** JSON fields the struct does not declare — the real `/session` response also carries `slug`, `cost`, `tokens`, and `path`, and none of those need to exist in the struct. Parsing what you need is not a bug.
+
+### `Arc<dyn HttpClient>` — read it inside-out
+
+- `HttpClient` is a **trait** — an interface. GPUI defines it; `ReqwestClient` is one implementation.
+- `dyn` means "some type implementing this trait, decided at runtime." Explicit in Rust; implicit in TypeScript because interfaces are structural.
+- `Arc` is a reference-counted pointer: several owners share one value. Thread-safe sibling of `Rc`.
+
+So the field reads: "a shared, runtime-chosen HTTP client." Same *idea* as `Entity<T>` — a handle to something you do not own directly.
+
+### The client receives its HTTP client
+
+`OpencodeClient::new(base, http)` takes the `Arc<dyn HttpClient>` as a parameter — dependency injection. Two consequences:
+
+1. `new` **cannot fail**, so it returns `Self`, not `Result<Self>`.
+2. `new` takes **no `self` parameter** — it creates the value, so there is nothing to borrow yet. That is why it is called with `::` (`OpencodeClient::new(...)`), like a static method. Same pattern as `Theme::dark()`.
+
+Rule that fell out of the discussion: *if you can't write `self.something` in the body, the function shouldn't take `self`.*
+
+### Error handling shape
+
+`Result<T>` with `?` propagation, `anyhow::Context` layering the error chain, `bail!` for early `Err` returns. The contexts stack: `join ... onto ...` → `GET /global/health` → `read health body` → `parse health JSON` — so when something fails, the message names the exact step.
+
+The request body is a **private struct declared inside the function** (`NewSession { title }`), not a `json!` macro call. A typo'd field name is a compile error instead of a runtime 400. Same reasoning as preferring typed API responses over `any` in TS.
+
+### `async`/`await` — first contact
+
+`async fn` produces a *future* — a value representing work not yet done. `.await` pauses until it finishes. Nearly identical syntax to JS; the difference is that a Rust future does **nothing** until something polls it (JS promises run on an event loop by default). Async is contagious: a function containing `.await` must itself be `async`.
+
+The actual awaits live in the methods (`health`, `create_session`); something else (Phase 03b's `connect`) must drive them.
+
+### The borrow discussion (session 2 of Phase 03)
+
+Three questions from my own code, two wrong answers, corrected in chat:
+
+| Question | My answer | Verdict |
+|---|---|---|
+| Why `&mut self` on `clear`? | "it borrows content and changes it" | ✅ correct — but it borrows the *whole instance*, not just the field |
+| Why no `self` on `new`? | "nothing calls it yet" | ⚠️ right conclusion, wrong reason — `self` is a *parameter*, and `new` creates the value so there is nothing to borrow |
+| Why `.clone()` on `content().clone()`? | "I'll also borrow it" | ⚠️ right instinct (there IS a conflict), wrong mechanism — `.clone()` **ends** the borrow by copying |
+
+The E0502 error, reproduced in a scratch crate to see it for real:
+
+```
+error[E0502]: cannot borrow `self.child` as mutable because it is also borrowed as immutable
+```
+
+`content()` returns a reference *into* the child's memory; `clear()` needs `&mut` on the same memory; holding both is a use-after-free — the class of bug Rust exists to prevent. `.clone()` is not "I'll also borrow", it is **"I'll take a copy so I no longer need the borrow."**
+
+Rules that landed:
+
+1. `self` is a parameter, not a keyword. No `self` → call as `Type::f()`.
+2. `&self` reads, `&mut self` changes, `self` consumes. Compiler-enforced.
+3. Many `&` OR one `&mut`, never both. `.clone()` escapes the conflict by producing an owned value.
+
+### Project pacing decision
+
+Phase 03's original single file (365 lines, ~7 new concepts) was too much for one sitting. **The phase was split into 03a/03b/03c**, and the splitting convention was added to AGENTS.md: split any phase that would introduce more than ~4 new Rust concepts per sitting; parts must compile standalone; each carries a status header; `task.md` records the position. Phases 05 and 06 were split the same way in the same session.
+
+**Misconception logged:** "the project itself is too complex and should be scaled down." Examined and rejected — the wall was pacing, not scope. The difficulty map showed Phase 03 and 05 as the two peaks; 04/07/08 are gentle. A smaller project (todo app, CLI) hits the same Arc/async/Option wall with none of the accumulated momentum. Verdict: continue, one part per sitting.

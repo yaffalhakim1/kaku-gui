@@ -4,6 +4,9 @@ use crate::input::TextInput;
 use crate::theme::Theme;
 use crate::SendPrompt;
 
+use crate::client::{OpencodeClient, Session};
+use gpui::http_client::Url;
+
 #[derive(Debug, Clone)]
 pub enum Role {
     User,
@@ -30,11 +33,13 @@ pub struct KakuApp {
     messages: Vec<DisplayMessage>,
     status: Status,
     input: Entity<TextInput>,
+    session: Option<Session>,
+    client: Option<OpencodeClient>,
 }
 
 impl KakuApp {
     pub fn new(_window: &mut Window, cx: &mut App) -> Entity<Self> {
-        cx.new(|cx| {
+        let app = cx.new(|cx| {
             let input = cx.new(|cx| TextInput::new(cx));
             Self {
                 focus_handle: cx.focus_handle(),
@@ -51,8 +56,12 @@ impl KakuApp {
                 ],
                 status: Status::Idle,
                 input,
+                session: None,
+                client: None,
             }
-        })
+        });
+        app.update(cx, |this, cx| this.connect(cx));
+        app
     }
 }
 
@@ -123,11 +132,18 @@ impl KakuApp {
 
 impl KakuApp {
     fn render_status_bar(&self, status: Status, theme: Theme) -> impl IntoElement {
+        let session_id = self
+            .session
+            .as_ref()
+            .map(|s| s.id.clone())
+            .unwrap_or_else(|| "not connected".to_string());
+
         let label = match status {
-            Status::Idle => "Ready",
-            Status::Busy => "Thinking…",
-            Status::Error(ref e) => e.as_ref(),
+            Status::Idle => format!("Ready — {session_id}"),
+            Status::Busy => "Thinking…".to_string(),
+            Status::Error(ref e) => format!("Error: {e}"),
         };
+
         div()
             .h(px(24.0))
             .px(px(12.0))
@@ -148,6 +164,48 @@ impl KakuApp {
 impl Focusable for KakuApp {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+impl KakuApp {
+    fn connect(&mut self, cx: &mut Context<Self>) {
+        let base =
+            std::env::var("KAKU_GUI_URL").unwrap_or_else(|_| "http://127.0.0.1:4096".to_string());
+
+        let url = match Url::parse(&base) {
+            Ok(u) => u,
+            Err(e) => {
+                self.status = Status::Error(format!("Invalid URL: {e}"));
+                cx.notify();
+                return;
+            }
+        };
+
+        let client = OpencodeClient::new(url, cx.http_client());
+
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                client.health().await?;
+                let session = client.create_session("kaku-gui").await?;
+                Ok::<_, anyhow::Error>((client, session))
+            }
+            .await;
+
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok((client, session)) => {
+                        this.client = Some(client);
+                        this.session = Some(session);
+                        this.status = Status::Idle;
+                    }
+                    Err(e) => {
+                        this.status = Status::Error(format!("connect: {e:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 
