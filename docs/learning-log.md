@@ -571,3 +571,27 @@ Two owners, one pipe each. The blocking `read_line` can never freeze the UI beca
 Two of the three errors above were **bugs in the teaching doc, not intentional lessons** — the doc promised "0 errors" at the verify step and did not deliver. The user caught this ("is fixing expected errors on the phase?"), which surfaced a real question about who owns doc errors. Resolution: doc bugs get fixed immediately (by the assistant, when asked), and the verify steps must be honest about what errors remain and why. A tutorial that lies about the expected state is worse than no tutorial.
 
 **Misconception logged:** "04b is still pending." Not anymore — the migration absorbed 04b's scope, because fixing the OpenCode import errors *was* the 04b wiring. The compiler's 6 remaining dead-code warnings now map exactly to Phase 05's work: `Busy`, `TurnStarted.turn_id`, `AgentMessageDelta.delta`.
+
+---
+
+## Phase 05: Send prompts and stream the reply
+
+**Result:** `send_prompt_action` sends `turn/start` through the `CodexClient` handle, pushes a user message plus an empty assistant placeholder (`streaming_idx`), sets `Status::Busy`, and `apply_event` streams `AgentMessageDelta` fragments into the placeholder via `push_str`. `TurnStarted` records `active_turn_id` (for 06a abort); `TurnCompleted` returns status to Idle and clears both. Committed as `ac65581`.
+
+### The fire-and-forget insight (quiz answer)
+
+Why does `client.request("turn/start", ...)` run directly on the UI thread with no spawn, when Phase 03b said "never do network work on the UI thread"? Because `request` is a **stdin write** — one JSON line into the child process's pipe, microseconds. The actual OpenAI network calls happen inside the *Codex process*, not kaku. In Phase 03b, `client.health().await` meant kaku itself waited on a network round-trip, so it had to leave the UI thread. Same rule, different situation: the rule is really "never *block* the UI thread" — and nothing here blocks.
+
+### Deltas vs full-text (quiz miss)
+
+OpenCode's `message.part.updated` carried the full accumulated text → **assign** (`message.text = text`). Codex's `item/agentMessage/delta` carries a fragment → **append** (`message.text.push_str(&delta)`). Using assignment with deltas means each fragment overwrites the previous one — the message flickers and only the last chunk ever shows. That failure is called **dropping data**: every delta arrived, none were accumulated. The opposite bug (duplicates) comes from consuming the same event twice. Rule: *full-text events → assign; delta events → append; choose wrong either way and the transcript lies.*
+
+### New Rust in this phase
+
+- `push_str(&str)` — append a slice to an owned `String`, in place. JS: `s += x`.
+- Placeholder-index pattern: `streaming_idx: Option<usize>` — the index of the just-pushed empty assistant message; `messages.get_mut(idx)` returns `Option<&mut DisplayMessage>` so a stale index (list shrank) degrades to a no-op instead of a panic.
+- `active_turn_id: Option<String>` — captured from `turn/started` so 06a can send `turn/interrupt`.
+
+### Process note
+
+The user called out that the per-phase comprehension quizzes had quietly disappeared somewhere around Phase 04. Restored as a standing rule: 1-2 questions at the end of every phase, targeting understanding rather than syntax recall. Q1 landed; Q2 (deltas) did not — logged honestly as the open gap.
