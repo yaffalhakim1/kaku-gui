@@ -522,3 +522,52 @@ Rules that landed:
 Phase 03's original single file (365 lines, ~7 new concepts) was too much for one sitting. **The phase was split into 03a/03b/03c**, and the splitting convention was added to AGENTS.md: split any phase that would introduce more than ~4 new Rust concepts per sitting; parts must compile standalone; each carries a status header; `task.md` records the position. Phases 05 and 06 were split the same way in the same session.
 
 **Misconception logged:** "the project itself is too complex and should be scaled down." Examined and rejected — the wall was pacing, not scope. The difficulty map showed Phase 03 and 05 as the two peaks; 04/07/08 are gentle. A smaller project (todo app, CLI) hits the same Arc/async/Option wall with none of the accumulated momentum. Verdict: continue, one part per sitting.
+
+---
+
+## Phase 04: CodexClient — child process, JSON-RPC, and the direction change
+
+**Result:** `src/client/` rewritten from OpenCode HTTP to Codex App Server stdio: `CodexClient` (cloneable request handle), `ServerEvent` enum, blocking stdout reader. `app.rs` migrated: `connect` spawns the process on the background executor, a reader loop forwards events through an mpsc channel, `render` drains it, and the status bar shows a real `thr_…` thread id. 0 errors, 6 warnings — all Phase 05 material. Committed as `c6cead4`.
+
+### The direction change
+
+Mid-Phase-04, the project switched from OpenCode (HTTP REST + SSE) to Codex App Server (JSON-RPC over stdio). What transferred: everything from Phases 00-02 and all GPUI patterns (spawn/notify, WeakEntity, Option state). What died: `OpencodeClient`, `reqwest_client` (removed from Cargo.toml), SSE frame parsing. The API surface translated cleanly: `Session` → `Thread`, health+create → initialize+thread/start, SSE events → JSON-RPC notifications, abort endpoint → `turn/interrupt`.
+
+Protocol facts verified against official Codex docs and `codex-cli 0.154.0`:
+
+- Requests carry `method`/`params`/`id`; notifications omit `id` and arrive whenever.
+- `initialize` → read its response → `initialized` notification; the server rejects everything before this.
+- `thread/start` has a matching `thread/started` notification with the same data, so the client never waits on responses — it sends fire-and-forget and reads notifications. This sidesteps request/response correlation entirely.
+- `item/agentMessage/delta` is an **increment** (append), unlike OpenCode's full-text events.
+
+### Design bug caught on review (and fixed)
+
+The first draft created a **fresh `BufReader` per read** — BufReader buffers internally, so lines sitting in a discarded reader's buffer would be silently dropped. The fix shaped the whole architecture:
+
+- **UI owns a cloneable stdin handle** (`Arc<Mutex<ChildStdin>>`) for sending requests.
+- **One background thread exclusively owns the stdout reader**, forwards everything as events.
+
+Two owners, one pipe each. The blocking `read_line` can never freeze the UI because it runs on a pool thread, and only one owner ever reads the stream.
+
+### Concepts that landed
+
+- **Child processes**: `Command::new("codex").arg("app-server")`, `Stdio::piped()` for stdin/stdout, `Stdio::null()` to discard stderr. `child.stdin.take()` moves the pipe out of the `Option` field — the standard "extract and leave a hole" move.
+- **`Arc<Mutex<T>>`**: `Arc` = shared ownership, `Mutex` = one writer at a time. The clone exists because the request handle crosses into the UI via a channel event.
+- **`AtomicU64` + `fetch_add`**: thread-safe `id++` for request ids.
+- **`Value` indexing**: `msg["params"]["thread"]["id"]` walks JSON like `obj?.a?.b?.id` — wrong path yields `Value::Null`, not a throw. `.as_str()` then converts to `Option<&str>`.
+- **`mpsc` + drain loop**: `self.events.as_ref().and_then(|rx| rx.try_recv().ok())` in a `while let` — borrow ends each iteration, so `apply_event` can freely mutate `self`.
+- **`background_executor().spawn`**: plain async block, no `this`, no UI access — everything needed moves in (here, the `tx` sender).
+
+### Compile errors hit, and what they taught
+
+| Error | Cause | Lesson |
+|---|---|---|
+| E0277: `CodexClient` doesn't implement `Debug` | `#[derive(Debug)]` on `ServerEvent`, whose `Ready` variant holds a `CodexClient` | `derive(X)` on a struct recursively requires `X` on **all** field types. Fix: drop the derive you don't use, not derive more |
+| E0308: expected `Option<Value>`, found `Result` | `Ok(serde_json::from_str(x).context(...))` — missing `?` | `.context(...)?` bails out of the function; `.context(...)` hands you the Result as a *value*. Wrapping a Result in `Ok()` gives Result<Result<T>> — wrong shape |
+| E0432: unresolved imports | `app.rs` still importing `OpencodeClient`/`Session` | The only expected error at this phase boundary — 04b's job to fix |
+
+### Process note: whose bug is it?
+
+Two of the three errors above were **bugs in the teaching doc, not intentional lessons** — the doc promised "0 errors" at the verify step and did not deliver. The user caught this ("is fixing expected errors on the phase?"), which surfaced a real question about who owns doc errors. Resolution: doc bugs get fixed immediately (by the assistant, when asked), and the verify steps must be honest about what errors remain and why. A tutorial that lies about the expected state is worse than no tutorial.
+
+**Misconception logged:** "04b is still pending." Not anymore — the migration absorbed 04b's scope, because fixing the OpenCode import errors *was* the 04b wiring. The compiler's 6 remaining dead-code warnings now map exactly to Phase 05's work: `Busy`, `TurnStarted.turn_id`, `AgentMessageDelta.delta`.
