@@ -1,3 +1,7 @@
+use std::fmt::format;
+use std::thread;
+
+use gpui::Decorations::Server;
 use gpui::*;
 
 use crate::client::{read_msg, CodexClient, ServerEvent};
@@ -35,6 +39,8 @@ pub struct KakuApp {
     thread_id: Option<String>,
     client: Option<CodexClient>,
     events: Option<std::sync::mpsc::Receiver<ServerEvent>>,
+    streaming_idx: Option<usize>,
+    active_turn_id: Option<String>,
 }
 
 impl KakuApp {
@@ -59,6 +65,8 @@ impl KakuApp {
                 thread_id: None,
                 client: None,
                 events: None,
+                streaming_idx: None,
+                active_turn_id: None,
             }
         });
         app.update(cx, |this, cx| this.connect(cx));
@@ -128,6 +136,21 @@ impl KakuApp {
             ServerEvent::Disconnected(why) => {
                 self.status = Status::Error(format!("disconnected: {why}"));
             }
+            ServerEvent::TurnStarted { turn_id } => {
+                self.active_turn_id = Some(turn_id);
+            }
+            ServerEvent::AgentMessageDelta { delta } => {
+                if let Some(idx) = self.streaming_idx {
+                    if let Some(message) = self.messages.get_mut(idx) {
+                        message.text.push_str(&delta);
+                    }
+                }
+            }
+            ServerEvent::TurnCompleted => {
+                self.status = Status::Idle;
+                self.streaming_idx = None;
+                self.active_turn_id = None;
+            }
             _ => {}
         }
         cx.notify();
@@ -174,12 +197,39 @@ impl KakuApp {
         if text.trim().is_empty() {
             return;
         }
+
+        let Some(client) = self.client.clone() else {
+            self.status = Status::Error("not connected".to_string());
+            cx.notify();
+            return;
+        };
+        let Some(thread_id) = self.thread_id.clone() else {
+            return;
+        };
+
         self.messages.push(DisplayMessage {
             role: Role::User,
             text: text.clone(),
         });
+        self.messages.push(DisplayMessage {
+            role: Role::Assistant,
+            text: String::new(),
+        });
+        self.streaming_idx = Some(self.messages.len() - 1);
+        self.status = Status::Busy;
         self.input.update(cx, |input, cx| input.clear(cx));
         cx.notify();
+
+        if let Err(e) = client.request(
+            "turn/start",
+            json!({
+                "threadId":thread_id,
+                "input":[{"type" : "text", "text":text}],
+            }),
+        ) {
+            self.status = Status::Error(format!("send: {e:#}"));
+            cx.notify();
+        }
     }
 }
 
