@@ -14,7 +14,7 @@
 - `src/` has: `main.rs`, `app.rs`, `theme.rs`, `input.rs`, `client/mod.rs`,
   `client/types.rs` (OpenCode version, to be replaced in Phase 04).
 - Phases 00-03 complete, verified 0 errors, status bar shows a session id.
-- `src/client/` still speaks OpenCode; Phase 04 rewrites it as `CodexClient`.
+- `reqwest_client` removed from Cargo.toml (OpenCode stack retired).
 
 ## Completed
 - [x] Scaffold, AGENTS.md, phase docs 00-08
