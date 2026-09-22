@@ -1,13 +1,9 @@
-# Phase 06 — Abort, Scroll, and Status Polish
+# Phase 06 — Abort, Scroll, and Status Polish (pointer stub)
 
-> **This phase was split into two smaller files (2026-09-22) for pacing.**
->
-> Read and work through them in order:
+> Split into two parts. 06a has been revised for the Codex stack
+> (`turn/interrupt`); 06b is unchanged (pure UI).
 >
 > | Part | File | Scope |
 > |---|---|---|
-> | 06a | [`06a-abort.md`](06a-abort.md) | `Abort` action, keybinding, client method, flag |
+> | 06a | [`06a-abort.md`](06a-abort.md) | Abort action, keybinding, `turn/interrupt`, flag |
 > | 06b | [`06b-scroll-status.md`](06b-scroll-status.md) | scrolling, auto-scroll, status dot |
->
-> Each part compiles on its own with 0 errors. Do not start a part before the
-> previous one is clean.

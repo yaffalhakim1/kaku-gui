@@ -4,7 +4,7 @@
 > This is **part 3 of 3**. Prerequisite: Phase 03b compiles with 0 errors and
 > `connect` is wired into `KakuApp::new`.
 >
-> **Status: not started.**
+> **Status: completed 2026-09-22.**
 
 ## What you will build
 

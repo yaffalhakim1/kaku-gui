@@ -1,156 +1,55 @@
-# Phase 07 — Slash Commands
+# Phase 07 — Slash Commands (Codex stack)
+
+> **Revised 2026-09-22 for the Codex direction change.**
 
 ## What you will build
-Support local-only slash commands: `/clear`, `/model`, and `/quit`.
+Local-only slash commands: `/clear`, `/model`, `/quit` — plus `/new` which
+starts a fresh Codex thread (`thread/start`), replacing OpenCode-era
+session thinking.
 
 ## Concepts you will learn
-- Creating a new module (`src/commands.rs`).
-- String slicing and parsing in Rust.
-- `std::process::exit`.
-- Conditional logic based on message content.
+- A new module (`src/commands.rs`).
+- String parsing (`strip_prefix`).
+- `model/list` over JSON-RPC.
+
+## Changes vs the OpenCode version
+
+- `/new` is *new*: sends `thread/start`, stores the returned `thread.id`,
+  clears the transcript. This is the natural "new conversation" on Codex.
+- `/model <name>`: sends `model/list`, matches the user's text against
+  `displayName`/`id`, then passes `model` in the next `turn/start` params.
+  (The old "local echo only" caveat goes away — Codex takes a `model`
+  override per turn.)
+- `/clear`, `/quit`, `/unknown` behave exactly as before (local only).
 
 ## Files to touch
-- `src/commands.rs` (new file)
+- `src/commands.rs` (new)
 - `src/app.rs`
-- `src/main.rs`
+- `src/main.rs` (`mod commands;`)
+- `src/client/mod.rs` (`list_models()` + `start_turn` gaining an optional
+  model param)
 
----
-
-## Step 1: Create `src/commands.rs`
+## `list_models` sketch
 
 ```rust
-use crate::app::KakuApp;
-use gpui::Context;
-
-#[derive(Clone, Debug)]
-pub enum Command {
-    Clear,
-    Model(String),
-    Quit,
-    Unknown(String),
-}
-
-pub fn parse(input: &str) -> Command {
-    let trimmed = input.trim();
-    if trimmed == "/clear" {
-        return Command::Clear;
-    }
-    if trimmed == "/quit" {
-        return Command::Quit;
-    }
-    if let Some(rest) = trimmed.strip_prefix("/model ") {
-        return Command::Model(rest.trim().to_string());
-    }
-    Command::Unknown(trimmed.to_string())
-}
-
-impl KakuApp {
-    pub fn execute_command(
-        &mut self,
-        cmd: Command,
-        _window: &mut gpui::Window,
-        cx: &mut Context<Self>,
-    ) {
-        match cmd {
-            Command::Clear => {
-                self.messages.clear();
-                cx.notify();
-            }
-            Command::Model(model) => {
-                // Local echo only. Actually switching models needs the
-                // `/api/session/{id}/model` endpoint, which is out of scope here.
-                self.messages.push(crate::app::DisplayMessage {
-                    role: crate::app::Role::System,
-                    text: format!("model override set to: {model}"),
-                });
-                cx.notify();
-            }
-            Command::Quit => {
-                std::process::exit(0);
-            }
-            Command::Unknown(text) => {
-                self.messages.push(crate::app::DisplayMessage {
-                    role: crate::app::Role::System,
-                    text: format!("Unknown command: {text}"),
-                });
-                cx.notify();
-            }
-        }
-    }
+pub fn list_models(&mut self) -> Result<Vec<ModelInfo>> {
+    // id: 4, method: "model/list", params: { "limit": 20 }
+    // read responses until id 4 arrives; parse result.data
 }
 ```
 
-> **Rust concept:** `strip_prefix`
-> Removes a prefix from a string if it exists, returning the rest. Like `str.startsWith(...)` combined with `slice`.
-
-> **Rust concept:** `self.messages.clear()`
-> Empties the vector in place.
-
----
-
-## Step 2: Register the module
-
-Add to `src/main.rs`:
-
-```rust
-mod commands;
-```
-
----
-
-## Step 3: Route commands in `send_prompt_action`
-
-In `src/app.rs`, update `send_prompt_action` to detect commands before sending:
-
-```rust
-fn send_prompt_action(
-    &mut self,
-    _: &SendPrompt,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-) {
-    let content = self.input.read(cx).content().clone();
-    let text = content.to_string();
-    let text = text.trim().to_string();
-    if text.is_empty() {
-        return;
-    }
-
-    self.input.update(cx, |input, cx| input.clear(cx));
-
-    if text.starts_with('/') {
-        self.messages.push(DisplayMessage {
-            role: Role::System,
-            text: text.clone(),
-        });
-        let cmd = crate::commands::parse(&text);
-        self.execute_command(cmd, window, cx);
-        return;
-    }
-
-    // ... rest of the existing send logic
-}
-```
-
-> **Rust concept:** `text.starts_with('/')`
-> Checks if a string begins with a character. This is how we distinguish commands from normal prompts.
-
----
+`ModelInfo { id, display_name, is_default }` — same `Deserialize` pattern as
+`Thread`.
 
 ## Verify
 
-1. `cargo run`
-2. Type `/clear` and press Enter — the chat should empty.
-3. Type `/model anthropic/claude-opus-4` — status bar shows the override.
-4. Type `/quit` — the app closes.
-5. Type `/unknown` — a system message says "Unknown command."
-
-## Common pitfall
-
-If commands are sent to OpenCode instead of running locally, make sure the `text.starts_with('/')` check happens before the HTTP call.
+1. `/clear` empties the chat.
+2. `/model gpt-5.6` matches a model from `model/list` and reports it.
+3. `/new` starts a fresh thread id (`thr_…`) and clears the transcript.
+4. `/quit` exits.
+5. `/bogus` shows "Unknown command."
 
 ---
 
-Once commands work, move to **Phase 08: Waku-Inspired UI/UX Polish**.
-
-**Markdown and reasoning rendering stay out of scope.** Phase 08 is a visual polish pass, not a rendering-engine phase.
+Once commands work, move to **Phase 08: Waku-inspired UI/UX polish**
+(unchanged — pure UI).
