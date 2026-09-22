@@ -1,36 +1,48 @@
-# Phase 05 — Streaming on the Codex stack
+# Phase 05 — Send prompts and stream the reply (Codex stack)
 
-> **Revised 2026-09-22 for the Codex direction change.** The old three-part
-> SSE split (05a/05b/05c) is retired — those files remain in git history.
-> On the Codex stack there is no separate SSE endpoint: the JSON-RPC
-> notifications on the app-server stream *are* the event stream.
+> **Revised 2026-09-22 (Codex direction change).** The old SSE split
+> (05a/05b/05c) is retired — on the Codex stack the JSON-RPC notifications
+> *are* the stream, and the channel + drain loop already landed in 04b.
 
 ## What you will build
 
-The event plumbing (enum + channel + drain loop) and the reader task that
-turns raw notifications into UI events. Phase 04's `CodexClient` already has
-`read_notification()`; this phase wires it into the app.
+`send_prompt_action` sends `turn/start` through the `CodexClient` handle,
+pushes a user message and an empty assistant placeholder, and
+`apply_event` streams `AgentMessageDelta` into it.
 
-## Parts
+## Concepts
+- Fire-and-forget requests: `turn/start` acks instantly; the reply arrives
+  as notifications.
+- `AgentMessageDelta` **appends** (`push_str`) — each delta is an increment,
+  unlike OpenCode's full-text events.
+- `TurnStarted` gives you the `turn_id` to remember (Phase 06a needs it).
+- `TurnCompleted` returns the status to Idle and clears the placeholder
+  index.
 
-| Part | Scope |
-|---|---|
-| 05a | `UiEvent` enum, `mpsc` channel field, drain loop in `render` |
-| 05b | background reader task calling `read_notification()` in a loop, pushing events |
-| 05c | end-to-end: prompt streams text, `turn/completed` returns status to Idle |
+## Shape
 
-Concepts carried over from the OpenCode version unchanged:
-- enum variants carrying data
-- `std::sync::mpsc` (many senders, one receiver)
-- draining a channel inside `render` with `try_recv()`
-- the `cx.spawn` / `background_executor().spawn` split
+```rust
+// send_prompt_action, after the guards:
+let Some(client) = self.client.clone() else { ... };
+let Some(thread_id) = self.thread_id.clone() else { ... };
 
-What changed vs the SSE version:
-- no SSE frames or `data: ` prefix stripping — `read_msg` yields whole JSON
-  values already
-- `item/agentMessage/delta` **appends** (`delta` is an increment), unlike
-  OpenCode's full-text `message.part.updated` — the `apply_event` arm does
-  `message.text.push_str(&delta)` instead of assignment
-- `turn/completed` plays the role of `session.idle`
+client.request("turn/start", json!({
+    "threadId": thread_id,
+    "input": [{ "type": "text", "text": text }],
+}))?;
+```
 
-Each part still compiles on its own with 0 errors before starting the next.
+`apply_event` gains the `TurnStarted` / `AgentMessageDelta` /
+`TurnCompleted` arms, plus `streaming_idx: Option<usize>` routing — the
+same placeholder pattern from the OpenCode-era Phase 04.
+
+## Verify
+
+1. `cargo run` — type a prompt, press Enter.
+2. The assistant placeholder fills as deltas arrive (append!).
+3. Status returns to `Ready` when the turn completes.
+
+## Common pitfall
+
+Text appends twice → you assigned AND appended, or the drain loop runs the
+same event twice. The drain loop must consume; `try_recv` does.
