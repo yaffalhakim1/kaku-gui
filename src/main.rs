@@ -10,14 +10,11 @@ mod client;
 use crate::app::KakuApp;
 use gpui::*;
 use gpui_platform::application;
-use reqwest_client::ReqwestClient;
-use std::sync::Arc;
 
 actions!(kaku_gui, [SendPrompt, Abort]);
 
 fn main() {
     application()
-        .with_http_client(Arc::new(ReqwestClient::new()))
         .run(|cx: &mut App| {
             cx.bind_keys([
                 KeyBinding::new("enter", SendPrompt, Some("KakuApp")),
