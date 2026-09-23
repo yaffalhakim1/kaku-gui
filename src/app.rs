@@ -7,7 +7,7 @@ use gpui::*;
 use crate::client::{read_msg, CodexClient, ServerEvent};
 use crate::input::TextInput;
 use crate::theme::Theme;
-use crate::SendPrompt;
+use crate::{Abort, SendPrompt};
 use serde_json::json;
 
 #[derive(Debug, Clone)]
@@ -231,6 +231,23 @@ impl KakuApp {
             cx.notify();
         }
     }
+
+    fn abort_action(&mut self, _: &Abort, _window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(client), Some(thread_id), Some(turn_id)) = (
+            self.client.as_ref(),
+            self.thread_id.as_ref(),
+            self.active_turn_id.as_ref(),
+        ) else {
+            return;
+        };
+
+        let thread_id = thread_id.clone();
+        let turn_id = turn_id.clone();
+        if let Err(e) = client.interrupt(&thread_id, &turn_id) {
+            self.status = Status::Error(format!("abort: {e:#}"));
+        }
+        cx.notify();
+    }
 }
 
 impl KakuApp {
@@ -330,6 +347,7 @@ impl Render for KakuApp {
             .flex_col()
             .bg(theme.background)
             .on_action(cx.listener(Self::send_prompt_action))
+            .on_action(cx.listener(Self::abort_action))
             .child(self.render_messages(messages, theme))
             .child(self.render_input_bar(theme))
             .child(self.render_status_bar(status, theme))

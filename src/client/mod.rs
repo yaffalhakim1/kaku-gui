@@ -77,6 +77,15 @@ impl CodexClient {
         write_line(&mut stdin, &msg)?;
         Ok(id)
     }
+
+    pub fn interrupt(&self, thread_id: &str, turn_id: &str) -> Result<u64> {
+        self.request(
+            "turn/interrupt",
+            json!({
+                "threadId":thread_id, "turnId":turn_id
+            }),
+        )
+    }
 }
 
 fn write_line(stdin: &mut ChildStdin, value: &Value) -> Result<()> {
