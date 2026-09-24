@@ -41,6 +41,7 @@ pub struct KakuApp {
     events: Option<std::sync::mpsc::Receiver<ServerEvent>>,
     streaming_idx: Option<usize>,
     active_turn_id: Option<String>,
+    scroll_handle: ScrollHandle,
 }
 
 impl KakuApp {
@@ -67,6 +68,7 @@ impl KakuApp {
                 events: None,
                 streaming_idx: None,
                 active_turn_id: None,
+                scroll_handle: ScrollHandle::new(),
             }
         });
         app.update(cx, |this, cx| this.connect(cx));
@@ -143,6 +145,7 @@ impl KakuApp {
                 if let Some(idx) = self.streaming_idx {
                     if let Some(message) = self.messages.get_mut(idx) {
                         message.text.push_str(&delta);
+                        self.scroll_handle.scroll_to_bottom();
                     }
                 }
             }
@@ -151,6 +154,7 @@ impl KakuApp {
                 self.streaming_idx = None;
                 self.active_turn_id = None;
             }
+
             _ => {}
         }
         cx.notify();
@@ -160,11 +164,14 @@ impl KakuApp {
 impl KakuApp {
     fn render_messages(&self, messages: Vec<DisplayMessage>, theme: Theme) -> impl IntoElement {
         div()
+            .id("messages")
             .flex_1()
             .flex()
             .flex_col()
             .gap(px(8.0))
             .p(px(16.0))
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll_handle)
             .children(
                 messages
                     .into_iter()
@@ -273,10 +280,10 @@ impl KakuApp {
             .clone()
             .unwrap_or_else(|| "not connected".to_string());
 
-        let label = match status {
-            Status::Idle => format!("Ready — {thread_id}"),
-            Status::Busy => "Thinking…".to_string(),
-            Status::Error(ref e) => format!("Error: {e}"),
+        let (label, dot_color) = match status {
+            Status::Idle => (format!("Ready — {thread_id}"), theme.accent),
+            Status::Busy => ("Thinking…".to_string(), theme.text),
+            Status::Error(ref e) => (format!("Error: {e}"), theme.user),
         };
 
         div()
@@ -285,8 +292,10 @@ impl KakuApp {
             .flex()
             .flex_row()
             .items_center()
+            .gap(px(8.0))
             .border_t_1()
             .border_color(theme.border)
+            .child(div().size(px(6.0)).rounded_full().bg(dot_color))
             .child(
                 div()
                     .text_size(px(11.0))
